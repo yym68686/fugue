@@ -495,11 +495,13 @@ script	scripts/verify_dns_transport_isolation.py	migrate	unprivileged build chec
 script	scripts/verify_k3s_transport.py	migrate	unprivileged source checks, build or client packaging
 script	scripts/verify_managed_ssh_image.py	migrate	unprivileged build check or scoped runtime verification
 script	scripts/verify_observation_rollback_floor.py	migrate	native read-only exact serving revision and rollback floor verification
+script	scripts/verify_observation_sample_retention_api_rollout.py	migrate	native worker progress and fence continuity across the exact API rollout
 script	scripts/verify_observation_writer_handoff.py	migrate	native verified database writer transition observations
 script	scripts/verify_registry_image.py	migrate	unprivileged build check or scoped runtime verification
 script	scripts/verify_ssh_front_image.py	migrate	unprivileged build check or scoped runtime verification
 script	scripts/verify_ssh_front_transport.py	migrate	unprivileged build check or scoped runtime verification
 script	scripts/verify_storage_audit_activation.py	migrate	native independent writer ownership and serving verification
+script	scripts/verify_storage_audit_api_rollout.py	migrate	native independently observed audit worker continuity across the exact API rollout
 script	scripts/verify_storage_audit_worker.py	migrate	independent native readiness, database ownership and scrape verification
 workflow-job	.github/workflows/build-cli.yml#package	migrate	unprivileged source checks or build
 workflow-job	.github/workflows/ci.yml#agent_edge_activation	migrate	native platform policy and reconciliation
