@@ -30,6 +30,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/objectstorage"
 	"fugue/internal/observability"
+	"fugue/internal/oomrightsizing"
 	"fugue/internal/operationcancel"
 	"fugue/internal/operationview"
 	"fugue/internal/platformconfig"
@@ -177,8 +178,7 @@ type Server struct {
 	dnsParentNSLookup                      dnsParentNSLookupFunc
 	dnsOwnershipTXTLookup                  func(context.Context, string) ([]string, error)
 	logStreamTuning                        logStreamTuning
-	oomRightSizingMu                       sync.Mutex
-	oomRightSizingEvents                   map[string]time.Time
+	oomRightSizing                         oomrightsizing.Service
 	passiveASN                             passiveASNState
 	dnsObservation                         dnsObservationState
 	edgeDNSArtifactMu                      sync.Mutex
@@ -350,7 +350,6 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		dnsDelegationProbe:      defaultDNSDelegationProbe,
 		dnsParentNSLookup:       defaultDNSParentNSLookup,
 		logStreamTuning:         defaultLogStreamTuning(),
-		oomRightSizingEvents:    map[string]time.Time{},
 	}
 	if server.registryPullBase == "" {
 		server.registryPullBase = server.registryPushBase

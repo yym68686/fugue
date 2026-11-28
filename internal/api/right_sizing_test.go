@@ -593,14 +593,7 @@ func TestAutoRightSizingRecentOOMPreservesMemoryButAllowsCPURequestDownscale(t *
 		t.Fatal(err)
 	}
 	app, _ = stateStore.GetApp(app.ID)
-	oomOp, err := stateStore.CreateOperation(model.Operation{
-		TenantID:        tenant.ID,
-		Type:            model.OperationTypeDeploy,
-		RequestedByType: model.ActorTypeSystem,
-		RequestedByID:   model.OperationRequestedByOOMRightSizing + "/test",
-		AppID:           app.ID,
-		DesiredSpec:     &app.Spec,
-	})
+	oomOp, err := stateStore.EnqueueOOMRightSizingDeploy(app, model.OperationRequestedByOOMRightSizing+"/0123456789abcdef01234567", app.Spec, nil)
 	if err != nil {
 		t.Fatalf("create oom operation: %v", err)
 	}

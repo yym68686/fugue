@@ -7,10 +7,11 @@ import (
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
+	"fugue/internal/oomrightsizing"
 	"fugue/internal/store"
 )
 
-func TestRecentOOMEventKeysOnlyIncludesRecentOOMKilledContainers(t *testing.T) {
+func TestOOMTerminationAdapterPreservesKubernetesEvidence(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
@@ -40,9 +41,10 @@ func TestRecentOOMEventKeysOnlyIncludesRecentOOMKilledContainers(t *testing.T) {
 		},
 	}
 
-	keys := recentOOMEventKeys([]kubePodInfo{pod}, now.Add(-15*time.Minute), now)
-	if len(keys) != 1 {
-		t.Fatalf("expected one recent OOM event, got %#v", keys)
+	got := oomTerminations([]kubePodInfo{pod})
+	if len(got) != 3 || got[0].Pod != "demo-abc" || got[0].Container != "demo" || got[0].State != "last-state" ||
+		got[0].Reason != "OOMKilled" || got[0].Restarts != 1 || !recent.Equal(*got[0].FinishedAt) {
+		t.Fatalf("termination evidence changed: %+v", got)
 	}
 }
 
@@ -90,33 +92,15 @@ func TestQueueOOMRightSizingDeployHonorsTenantEnvelopeOnOwnedRuntime(t *testing.
 	}
 
 	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
-	err = server.queueOOMRightSizingDeploy(app, []oomRightSizingTarget{{
-		kind: model.ClusterNodeWorkloadKindBackingService,
-		id:   app.BackingServices[0].ID,
-		eventKeys: []string{
+	err = server.queueOOMRightSizingDeploy(app, []oomrightsizing.Target{{
+		Kind: model.ClusterNodeWorkloadKindBackingService,
+		ID:   app.BackingServices[0].ID,
+		EventKeys: []string{
 			"demo-postgres-1/postgres/last-state/1/2026-06-10T11:58:00Z",
 		},
 	}})
 	if !errors.Is(err, store.ErrBillingCapExceeded) {
 		t.Fatalf("expected tenant envelope to reject owned-runtime growth, got %v", err)
-	}
-}
-
-func TestOOMExpandedResourceSpecGrowsRequestAndLimitWithoutChangingCPU(t *testing.T) {
-	t.Parallel()
-
-	got := oomExpandedResourceSpec(&model.ResourceSpec{
-		CPUMilliCores:        500,
-		CPULimitMilliCores:   750,
-		MemoryMebibytes:      1024,
-		MemoryLimitMebibytes: 1024,
-	}, model.BackingServiceTypePostgres)
-
-	if got.CPUMilliCores != 500 || got.CPULimitMilliCores != 750 {
-		t.Fatalf("expected CPU resources to remain unchanged, got %+v", got)
-	}
-	if got.MemoryMebibytes != 1536 || got.MemoryLimitMebibytes != 1664 {
-		t.Fatalf("expected OOM growth to 1536Mi request and 1664Mi limit, got %+v", got)
 	}
 }
 
@@ -165,18 +149,18 @@ func TestQueueOOMRightSizingDeployGrowsAppAndPostgres(t *testing.T) {
 	}
 
 	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
-	err = server.queueOOMRightSizingDeploy(app, []oomRightSizingTarget{
+	err = server.queueOOMRightSizingDeploy(app, []oomrightsizing.Target{
 		{
-			kind: model.ClusterNodeWorkloadKindApp,
-			id:   app.ID,
-			eventKeys: []string{
+			Kind: model.ClusterNodeWorkloadKindApp,
+			ID:   app.ID,
+			EventKeys: []string{
 				"demo-abc/demo/last-state/1/2026-06-10T11:58:00Z",
 			},
 		},
 		{
-			kind: model.ClusterNodeWorkloadKindBackingService,
-			id:   app.BackingServices[0].ID,
-			eventKeys: []string{
+			Kind: model.ClusterNodeWorkloadKindBackingService,
+			ID:   app.BackingServices[0].ID,
+			EventKeys: []string{
 				"demo-postgres-1/postgres/last-state/1/2026-06-10T11:59:00Z",
 			},
 		},
@@ -236,10 +220,10 @@ func TestQueueOOMRightSizingDeployDeduplicatesEventAcrossServers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
-	targets := []oomRightSizingTarget{{
-		kind: model.ClusterNodeWorkloadKindApp,
-		id:   app.ID,
-		eventKeys: []string{
+	targets := []oomrightsizing.Target{{
+		Kind: model.ClusterNodeWorkloadKindApp,
+		ID:   app.ID,
+		EventKeys: []string{
 			"demo-abc/demo/last-state/1/2026-06-10T11:58:00Z",
 		},
 	}}
@@ -261,11 +245,10 @@ func TestQueueOOMRightSizingDeployDeduplicatesEventAcrossServers(t *testing.T) {
 		t.Fatalf("expected one operation for the shared event, got %+v", operations)
 	}
 	duplicate := operations[0]
-	duplicate.ID = ""
-	duplicate.Status = ""
-	duplicate.CreatedAt = time.Time{}
-	duplicate.UpdatedAt = time.Time{}
-	if _, err := stateStore.CreateOperation(duplicate); !errors.Is(err, store.ErrConflict) {
-		t.Fatalf("expected store-level event fingerprint conflict, got %v", err)
+	if _, err := stateStore.CreateOperation(duplicate); !errors.Is(err, store.ErrInvalidInput) {
+		t.Fatalf("generic operation writer accepted OOM actor, got %v", err)
+	}
+	if _, err := stateStore.EnqueueOOMRightSizingDeploy(app, duplicate.RequestedByID, *duplicate.DesiredSpec, duplicate.DesiredSource); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("expected durable event fingerprint conflict through scoped admission, got %v", err)
 	}
 }
