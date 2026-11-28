@@ -145,11 +145,26 @@ if [ -n "$fugue_memory_peak_file" ]; then
 else
   unset FUGUE_BUILD_MEMORY_CGROUP
 fi
+fugue_memory_child=
+fugue_memory_pending_signal=
+fugue_memory_signaled=0
+fugue_memory_forward_signal() {
+  fugue_memory_signaled=1
+  if [ -n "$fugue_memory_child" ]; then
+    kill "-$1" "$fugue_memory_child" 2>/dev/null || true
+  else
+    fugue_memory_pending_signal=$1
+  fi
+}
+# Install handlers before starting the child. It may already be running when
+# the wrapper receives a signal but has not yet saved the PID.
+trap 'fugue_memory_forward_signal TERM' TERM
+trap 'fugue_memory_forward_signal INT' INT
 "$@" &
 fugue_memory_child=$!
-fugue_memory_signaled=0
-trap 'fugue_memory_signaled=1; kill -TERM "$fugue_memory_child" 2>/dev/null || true' TERM
-trap 'fugue_memory_signaled=1; kill -INT "$fugue_memory_child" 2>/dev/null || true' INT
+if [ -n "$fugue_memory_pending_signal" ]; then
+  fugue_memory_forward_signal "$fugue_memory_pending_signal"
+fi
 while :; do
   fugue_memory_signaled=0
   wait "$fugue_memory_child"

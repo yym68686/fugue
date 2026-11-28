@@ -180,6 +180,29 @@ func TestBuilderMemoryWrapperForwardsTerminationAndReapsChild(t *testing.T) {
 	}
 }
 
+func TestBuilderMemoryWrapperForwardsTerminationDuringChildStartup(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	t.Setenv("FUGUE_TEST_CHILD_READY", filepath.Join(t.TempDir(), "ready"))
+	launch := "\"$@\" &\n"
+	if !strings.Contains(builderMemoryWrapper, launch) {
+		t.Fatal("could not find child launch to insert startup barrier")
+	}
+	// Deliver TERM after the child installs its handler and before the
+	// wrapper binds the child PID. This ordering previously killed the wrapper.
+	wrapper := strings.Replace(builderMemoryWrapper, launch, launch+`
+while [ ! -f "$FUGUE_TEST_CHILD_READY" ]; do sleep 0.01; done
+kill -TERM "$$"
+`, 1)
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", wrapper, "fugue-memory", "1", "/bin/sh", "-c", `trap 'exit 23' TERM; : > "$FUGUE_TEST_CHILD_READY"; sleep 1`)
+	cmd.WaitDelay = time.Second
+	_, err := cmd.CombinedOutput()
+	var exit *exec.ExitError
+	if ctx.Err() != nil || !errors.As(err, &exit) || exit.ExitCode() != 23 {
+		t.Fatalf("startup termination lost child's exit status: %v (context: %v)", err, ctx.Err())
+	}
+}
+
 func TestBuilderMemoryAnnotationsPreserveExistingMetadata(t *testing.T) {
 	for _, annotations := range []any{map[string]string{"existing": "retained"}, map[string]any{"existing": "retained"}} {
 		job := map[string]any{"spec": map[string]any{"template": map[string]any{"metadata": map[string]any{"annotations": annotations}}}}

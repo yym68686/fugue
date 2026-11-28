@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"strings"
@@ -23,8 +24,22 @@ const remoteInspectorCacheTTL = 30 * time.Second
 
 type remoteInspectorCacheEntry struct {
 	CheckedAt time.Time
+	Result    Inspection
+}
+
+// Inspection is a detached observation of one registry reference. The
+// digest and blob sizes come from the same manifest read.
+type Inspection struct {
+	ImageRef  string
+	Digest    string
 	Exists    bool
+	SizeBytes int64
 	BlobSizes map[string]int64
+}
+
+func (result Inspection) Clone() Inspection {
+	result.BlobSizes = maps.Clone(result.BlobSizes)
+	return result
 }
 
 type RemoteInspector struct {
@@ -41,33 +56,57 @@ func NewRemoteInspector() *RemoteInspector {
 }
 
 func (r *RemoteInspector) InspectImage(ctx context.Context, imageRef string) (bool, map[string]int64, error) {
+	result, err := r.inspect(ctx, imageRef, false)
+	if len(result.BlobSizes) == 0 {
+		return result.Exists, nil, err
+	}
+	return result.Exists, result.BlobSizes, err
+}
+
+// inspect shares the manifest observation and cache while preserving the
+// richer HTTP adapter's existing reference-qualified errors.
+func (r *RemoteInspector) inspect(ctx context.Context, imageRef string, contextualErrors bool) (Inspection, error) {
 	normalized := SanitizeImageRef(imageRef)
 	if normalized == "" {
-		return false, nil, fmt.Errorf("image_ref is required")
+		return Inspection{}, fmt.Errorf("image_ref is required")
 	}
-	if exists, blobSizes, ok := r.readCache(normalized); ok {
-		return exists, blobSizes, nil
+	if result, ok := r.readCache(normalized); ok {
+		return result, nil
 	}
 
 	ref, err := parseReference(normalized)
 	if err != nil {
-		return false, nil, err
+		return Inspection{}, err
 	}
 	descriptor, err := remote.Get(ref, remoteOptions(ctx)...)
 	if err != nil {
 		if isNotFound(err) {
-			r.writeCache(normalized, false, nil)
-			return false, nil, nil
+			result := Inspection{ImageRef: normalized}
+			r.writeCache(normalized, result)
+			return result, nil
 		}
-		return false, nil, err
+		if contextualErrors {
+			err = fmt.Errorf("inspect image %s: %w", normalized, err)
+		}
+		return Inspection{}, err
 	}
 
 	blobSizes, err := r.collectDescriptorBlobSizes(ctx, ref, descriptor, make(map[string]struct{}))
 	if err != nil {
-		return false, nil, err
+		if contextualErrors {
+			err = fmt.Errorf("inspect image %s: %w", normalized, err)
+		}
+		return Inspection{}, err
 	}
-	r.writeCache(normalized, true, blobSizes)
-	return true, cloneBlobSizes(blobSizes), nil
+	result := Inspection{
+		ImageRef:  normalized,
+		Digest:    descriptor.Digest.String(),
+		Exists:    true,
+		SizeBytes: SumBlobSizes(blobSizes),
+		BlobSizes: blobSizes,
+	}
+	r.writeCache(normalized, result)
+	return result.Clone(), nil
 }
 
 func (r *RemoteInspector) collectDescriptorBlobSizes(
@@ -130,36 +169,30 @@ func (r *RemoteInspector) collectDescriptorBlobSizes(
 	}
 }
 
-func (r *RemoteInspector) readCache(imageRef string) (bool, map[string]int64, bool) {
+func (r *RemoteInspector) readCache(imageRef string) (Inspection, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	entry, ok := r.cache[imageRef]
 	if !ok || time.Since(entry.CheckedAt) > r.ttl {
-		return false, nil, false
+		return Inspection{}, false
 	}
-	return entry.Exists, cloneBlobSizes(entry.BlobSizes), true
+	return entry.Result.Clone(), true
 }
 
-func (r *RemoteInspector) writeCache(imageRef string, exists bool, blobSizes map[string]int64) {
+func (r *RemoteInspector) writeCache(imageRef string, result Inspection) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cache[imageRef] = remoteInspectorCacheEntry{
 		CheckedAt: time.Now().UTC(),
-		Exists:    exists,
-		BlobSizes: cloneBlobSizes(blobSizes),
+		Result:    result.Clone(),
 	}
 }
 
-func cloneBlobSizes(blobSizes map[string]int64) map[string]int64 {
-	if len(blobSizes) == 0 {
-		return nil
-	}
-	cloned := make(map[string]int64, len(blobSizes))
-	for digest, sizeBytes := range blobSizes {
-		cloned[digest] = sizeBytes
-	}
-	return cloned
+func (r *RemoteInspector) clearCache(imageRef string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.cache, imageRef)
 }
 
 func descriptorSizeBytes(descriptor *remote.Descriptor) int64 {

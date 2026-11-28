@@ -1,4 +1,4 @@
-package api
+package appimages
 
 import (
 	"fmt"
@@ -9,17 +9,17 @@ import (
 	"fugue/internal/model"
 )
 
-func referenceIndexFixture(versions int) (distributedImageUsageEvidence, []appImageCandidate) {
-	e := distributedImageUsageEvidence{
+func referenceIndexFixture(versions int) (DistributedEvidence, []Candidate) {
+	e := DistributedEvidence{
 		imagesByAppID: make(map[string][]model.Image), locationsByAppID: make(map[string][]model.ImageLocation),
 		staleLocationsByAppID: make(map[string][]model.ImageLocation), manifestsByKey: make(map[string][]model.ImageCacheManifest),
 	}
-	var candidates []appImageCandidate
+	var candidates []Candidate
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	for i := 0; i < versions; i++ {
 		ref := fmt.Sprintf("registry.example/fugue-apps/example:v%d", i)
 		digest := fmt.Sprintf("sha256:%064x", i+1)
-		candidate := appImageCandidate{ImageRef: ref, RuntimeImageRef: fmt.Sprintf("localhost:5000/fugue-apps/example:v%d", i)}
+		candidate := Candidate{ImageRef: ref, RuntimeImageRef: fmt.Sprintf("localhost:5000/fugue-apps/example:v%d", i)}
 		candidates = append(candidates, candidate)
 		e.imagesByAppID["app"] = append(e.imagesByAppID["app"], model.Image{ImageRef: ref, CanonicalDigest: digest, LifecycleState: model.ImageLifecycleAvailable, UpdatedAt: now})
 		for j := 0; j < 3; j++ {
@@ -46,7 +46,7 @@ func TestDistributedImageReferenceIndexPreservesMeasurements(t *testing.T) {
 	indexed := e
 	indexed.buildReferenceIndexes()
 	for _, appID := range []string{"app", "other", "absent"} {
-		for _, candidate := range append(candidates, appImageCandidate{ImageRef: "registry.example/fugue-apps/example:absent"}) {
+		for _, candidate := range append(candidates, Candidate{ImageRef: "registry.example/fugue-apps/example:absent"}) {
 			app := model.App{ID: appID}
 			want := distributedImageCandidateMeasurementFor(app, candidate, e)
 			got := distributedImageCandidateMeasurementFor(app, candidate, indexed)

@@ -44,7 +44,19 @@ func DeleteRemoteImage(ctx context.Context, imageRef string) (DeleteResult, erro
 		}, nil
 	}
 
-	digestRef, err := parseReference(fmt.Sprintf("%s@%s", ref.Context().Name(), digest))
+	return deleteInspectedReference(ctx, ref.Context().Name(), normalized, digest)
+}
+
+func deleteInspectedImage(ctx context.Context, normalized, digest string) (DeleteResult, error) {
+	ref, err := parseReference(normalized)
+	if err != nil {
+		return DeleteResult{}, err
+	}
+	return deleteInspectedReference(ctx, ref.Context().Name(), normalized, digest)
+}
+
+func deleteInspectedReference(ctx context.Context, repository, normalized, digest string) (DeleteResult, error) {
+	digestRef, err := parseReference(fmt.Sprintf("%s@%s", repository, digest))
 	if err != nil {
 		return DeleteResult{}, err
 	}

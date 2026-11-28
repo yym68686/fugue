@@ -1,4 +1,4 @@
-package api
+package appimages
 
 import (
 	"sort"
@@ -15,7 +15,7 @@ func (index distributedImageReferenceIndex) add(appID string, position int, ref,
 	if index[appID] == nil {
 		index[appID] = make(map[string][]int)
 	}
-	for _, key := range distributedImageCandidateKeys(appImageCandidate{ImageRef: ref}, digest) {
+	for _, key := range distributedImageCandidateKeys(Candidate{ImageRef: ref}, digest) {
 		index[appID][key] = append(index[appID][key], position)
 	}
 }
@@ -35,7 +35,7 @@ func (index distributedImageReferenceIndex) matches(appID string, keys []string)
 	return positions
 }
 
-func (e *distributedImageUsageEvidence) buildReferenceIndexes() {
+func (e *DistributedEvidence) buildReferenceIndexes() {
 	e.imageReferenceIndex = make(distributedImageReferenceIndex)
 	e.locationReferenceIndex = make(distributedImageReferenceIndex)
 	e.staleLocationReferenceIndex = make(distributedImageReferenceIndex)
@@ -56,7 +56,7 @@ func (e *distributedImageUsageEvidence) buildReferenceIndexes() {
 	}
 }
 
-func distributedImageLocationsForCandidateWithReferences(appID string, candidate appImageCandidate, byAppID map[string][]model.ImageLocation, index distributedImageReferenceIndex) []model.ImageLocation {
+func distributedImageLocationsForCandidateWithReferences(appID string, candidate Candidate, byAppID map[string][]model.ImageLocation, index distributedImageReferenceIndex) []model.ImageLocation {
 	if index == nil {
 		return distributedImageLocationsForCandidateFromIndex(appID, candidate, byAppID)
 	}
