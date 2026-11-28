@@ -1308,6 +1308,21 @@ jobs:
             sudo apt-get install -y postgresql-client
           fi
           make test-postgres
+      - name: Rehearse database import writer fencing and build the standalone worker
+        timeout-minutes: 15
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
+          IMPORT_FIXTURE_ADMIN_URL: postgresql://postgres:fugue-ci-fixture@127.0.0.1:${{ job.services.postgres.ports[5432] }}/fugue_test?sslmode=disable
+          FUGUE_IMPORT_FENCE_TEST_DATABASE_URL: postgresql://postgres:fugue-ci-fixture@127.0.0.1:${{ job.services.postgres.ports[5432] }}/fugue_test_import_fence?sslmode=disable
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
+          if git diff --quiet "$base" HEAD -- internal/dbimportworker internal/appdbimport internal/appmanageddb cmd/fugue-database-import-worker Dockerfile.database-import-worker .github/workflows/ci.yml; then exit 0; fi
+          psql "$IMPORT_FIXTURE_ADMIN_URL" -X -v ON_ERROR_STOP=1 -c 'CREATE DATABASE fugue_test_import_fence'
+          go test -count=1 -v ./internal/dbimportworker ./internal/appdbimport ./cmd/fugue-database-import-worker
+          docker build --platform linux/amd64 --file Dockerfile.database-import-worker --tag fugue-database-import-worker:ci .
+          test "$(docker image inspect --format '{{.Config.User}}' fugue-database-import-worker:ci)" = '65532:65532'
       - name: Admit a standalone application mail handoff
         id: app_mail_reconcile_handoff
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
