@@ -1,0 +1,21 @@
+{
+  "schema": "fugue.observation-sample-retention-handoff/v1",
+  "api": {
+    "deployment": "fugue-fugue-api",
+    "container": "api",
+    "image": "ghcr.io/yym68686/fugue-api@sha256:d98b2b481681ace7025bda5f59a6666452dc3e58241878fba19bf44870ab30e8",
+    "revision": "584b232e165f24a63816604e2b04bb24cfa2ecb6",
+    "replicas": 2
+  },
+  "worker": {
+    "deployment": "fugue-observation-worker",
+    "container": "observation-worker",
+    "image": "ghcr.io/yym68686/fugue-observation-worker@sha256:2fd5b1de894a9631e21cfc9b9fa23171f04f8300e2dcb8656b87408da39ab2e6",
+    "revision": "aed13628a4e4e2ba29ebaaa86a9305d5c7ecc98f",
+    "replicas": 1
+  },
+  "apiForwardFloor": "97845f1d338a5fa6388e24201a081704a9f77999",
+  "apiRollbackFloor": "97845f1d338a5fa6388e24201a081704a9f77999",
+  "workerForwardFloor": "aed13628a4e4e2ba29ebaaa86a9305d5c7ecc98f",
+  "workerRollbackFloor": "98da41b8f4cc504f4448d33197d3e5637f04e2ab"
+}
