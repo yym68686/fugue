@@ -16,6 +16,7 @@ type operationCreatePolicy struct {
 	RejectNoopDeploy                              bool
 	ReuseActiveImageRebuildForApp                 bool
 	RejectActiveImportForApp                      bool
+	AllowOOMRightSizingDeploy                     bool
 }
 
 type operationCreateOutcome struct {

@@ -16,6 +16,7 @@ not authorize another writer, add a release lane, or prove fault isolation.
 | Application release retirement | The retirement domain owns bounded per-app scheduling, cursor and retry state. Controller owns the leader lifecycle, verifies live traffic, runtime and workload evidence, and invokes guarded writes. | A tenant/app-scoped port serves the retirement projection and guarded writes. Store revalidates the same snapshots and keeps the retirement and historical binding changes in the existing transaction. | Domain tests independently verify fairness, exclusion, retry isolation and worker cancellation. A source audit limits acquisition of the write port to the Controller adapters. Controller and Store verify runtime evidence, tenant/app scope and concurrent transitions. |
 | Application image registry and usage snapshots | The image domain owns registry transport, manifest traversal, blob accounting, distributed measurement and reference indexes, inspection cache and visibility-scoped snapshot refresh. HTTP authorizes and supplies read adapters. Controller maintenance verifies the current reference before deletion. | Registry deletion requires the observed digest. HTTP invalidates its observation after deletion or a confirmed absence. Usage snapshots detach their values and discard stale background observations. | Domain tests exercise registry behavior, scope, generation coherence and measurement conflicts. API tests cover first load, stale responses and tenant-specific observations. |
 | Builder admission | The domain owns build input identity, bounded memory history, permanent-failure reuse, OOM evidence and admission decisions. Controller supplies app-scoped evidence and coordinates build placement and source-sync status. | Only the Controller composition adapter acquires the builder checkpoint writer. The generic writer rejects the three historical namespaces, and there is no public generic page writer. The scoped adapter uses the original keys, PostgreSQL transaction and replica lock. | Domain tests run without API, Controller or Store. Store verifies namespace isolation; Controller integration verifies restart, concurrency, contention and old evidence replay. |
+| Runtime OOM right-sizing | The domain owns the periodic pass, workload-event interpretation, local claims, tenant commitment projection and growth decisions. API adapts the namespace-scoped Kubernetes observer and assembles the command; Controller continues executing ordinary deploy operations. | The scoped admission command fixes the operation kind and system actor, and keeps the existing app-row lock and durable per-tenant event index. The generic operation writer cannot impersonate the OOM actor. | Domain tests cover event identity, growth, retry and claim expiry. API contracts exercise observer lifecycle, cap checks and durable cross-replica deduplication. |
 
 For an operation's pre-claim dependency failure, Store verifies the pending
 snapshot under its existing write transaction. A stale dependency verdict
@@ -86,10 +87,10 @@ or source drift and is not counted in the local-edit P95.
   dependency. In narrower scopes, the tracked-source business-coupling
   and retired release mode audits also run uncached for both runtime and
   test-only edits. They scan the tracked tree regardless of which packages
-  import the changed source. The image-tracking and release-retirement
-  composition guards also run uncached for non-test Go files under `internal`
-  and `cmd`. Acquiring a write port from Store need not import the owning
-  domain's implementation.
+  import the changed source. The backup inventory, image-tracking,
+  release-retirement, builder admission and runtime OOM composition guards
+  also run uncached for non-test Go files under `internal` and `cmd`. Acquiring
+  a write port from Store need not import the owning domain's implementation.
 - Compare the report to `legacyTestCommands`; a missing suite forces full Go
   scope and is recorded in `omittedLegacyPackagesBeforeFallback`. This is a
   package-level comparison, not measured regression coverage. Non-Go,
@@ -146,8 +147,9 @@ a narrower test set. The manual daily audit exposes these switches as
 
 For a source-owned writer capability or generator with an implicit downstream
 consumer, use the manual `contract-backup-checkpoint`,
-`contract-builder-checkpoint`, `contract-tracking-scope`,
-`contract-retirement-scope`, or `contract-generator-consumer` shadow case. The witness first requires the
+`contract-builder-checkpoint`, `contract-oom-admission`,
+`contract-tracking-scope`, `contract-retirement-scope`, or
+`contract-generator-consumer` shadow case. The witness first requires the
 exact named consumer test to pass, applies one synthetic source regression,
 proves native and Linux artifact-target reports select that consumer uncached
 with no legacy omission, then requires the exact test and package to fail with
@@ -160,6 +162,9 @@ The `builder-runtime` and `builder-test` incremental cases measure one
 changed domain source file and one changed placement test, respectively.
 They measure local edits, not the shared checkpoint-contract or release
 intent changes. Use the target comparisons inside every timed sample.
+The `oom-runtime` and `oom-test` cases similarly measure an edit to the
+runtime OOM sweep and an isolated claim-expiry test. They do not measure
+edits to the shared operation transaction or an actual OOM-induced deploy.
 
 First measured case: a test-only operation-queue edit on Darwin arm64
 (8 logical CPUs, Go 1.25.7, `GOFLAGS=-p=2`), over 20 warm pairs: existing

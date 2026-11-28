@@ -56,6 +56,18 @@ BUILDER_TEST = (
     f"func TestEvaluatePlacementRequiresEligibleAllocationAbovePreviousOOM_{SAMPLE_MARKER}(t *testing.T) {{\n",
 )
 
+OOM_RUNTIME = (
+    "internal/oomrightsizing/sweep.go",
+    '"OOM right-sizing for app=%s failed: %v"',
+    f'"OOM right-sizing ({SAMPLE_MARKER}) for app=%s failed: %v"',
+)
+
+OOM_TEST = (
+    "internal/oomrightsizing/sweep_test.go",
+    "func TestLocalClaimExpiresWithoutExposingState(t *testing.T) {\n",
+    f"func TestLocalClaimExpiresWithoutExposingState_{SAMPLE_MARKER}(t *testing.T) {{\n",
+)
+
 TRACKING_SCOPE_REGRESSION = (
     "internal/controller/candidate_startup_budget.go",
     "s.Store.ReadImageTracking().GetAppImageTracking(",
@@ -87,6 +99,12 @@ BUILDER_SCOPE_REGRESSION = (
     "\t_ = s.Store.BuilderAdmissionCheckpoints\n\treleases, err := s.Store.ListAppReleases(",
 )
 
+OOM_SCOPE_REGRESSION = (
+    "internal/controller/safe_rollout_resume.go",
+    "\treleases, err := s.Store.ListAppReleases(",
+    "\t_ = s.Store.EnqueueOOMRightSizingDeploy\n\treleases, err := s.Store.ListAppReleases(",
+)
+
 CASES = {
     "queue-runtime": (QUEUE_RUNTIME,),
     "queue-test": (QUEUE_TEST,),
@@ -95,6 +113,8 @@ CASES = {
     "retirement-test": (RETIREMENT_TEST,),
     "builder-runtime": (BUILDER_RUNTIME,),
     "builder-test": (BUILDER_TEST,),
+    "oom-runtime": (OOM_RUNTIME,),
+    "oom-test": (OOM_TEST,),
     "cross-domain": (QUEUE_RUNTIME, HOST_POLICY_TEST),
 }
 
@@ -103,6 +123,11 @@ CONTRACTS = {
         BUILDER_SCOPE_REGRESSION, "./internal/buildadmission",
         "TestOnlyControllerAdapterAcquiresBuilderAdmissionCheckpoints",
         "acquire builder admission checkpoints only in the Controller adapter",
+    ),
+    "contract-oom-admission": (
+        OOM_SCOPE_REGRESSION, "./internal/oomrightsizing",
+        "TestOnlyAPIAdapterUsesOOMRightSizingWritePort",
+        "only the API OOM adapter may acquire this write port",
     ),
     "contract-backup-checkpoint": (
         BACKUP_SCOPE_REGRESSION, "./internal/backupusage",

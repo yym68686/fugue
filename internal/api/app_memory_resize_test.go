@@ -41,11 +41,13 @@ func TestAppMemoryResizeAutoBypassesFullNodeSurgeWithoutChangingLimits(t *testin
 			if scenario == "recent-oom" || scenario == "failed-target" {
 				desired := app.Spec.DeepCopy()
 				desired.Resources.MemoryMebibytes = 768
-				actor := model.OperationRequestedByOOMRightSizing + "/event"
+				var op model.Operation
+				var err error
 				if scenario == "failed-target" {
-					actor = model.OperationRequestedByRightSizingDownscale
+					op, err = s.CreateAppRequestResizeOperation(model.Operation{TenantID: tenant.ID, AppID: app.ID, Type: model.OperationTypeAppMemoryResize, RequestedByType: model.ActorTypeSystem, RequestedByID: model.OperationRequestedByRightSizingDownscale, DesiredSpec: &desired}, app.Spec)
+				} else {
+					op, err = s.EnqueueOOMRightSizingDeploy(app, model.OperationRequestedByOOMRightSizing+"/0123456789abcdef01234567", desired, nil)
 				}
-				op, err := s.CreateAppRequestResizeOperation(model.Operation{TenantID: tenant.ID, AppID: app.ID, Type: model.OperationTypeAppMemoryResize, RequestedByType: model.ActorTypeSystem, RequestedByID: actor, DesiredSpec: &desired}, app.Spec)
 				if err != nil {
 					t.Fatal(err)
 				}
