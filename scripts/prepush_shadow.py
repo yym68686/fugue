@@ -52,7 +52,8 @@ REPOSITORY_TEST_CONSUMERS = {"./internal/platformsafety", "./internal/releasesou
 EDGE_GROUP_SOURCE_PREFIXES = ("internal/edge/", "internal/edgecontrol/", "internal/edgegroupfront/")
 # These composition guards scan non-test Go files under both source trees.
 APPLICATION_SOURCE_TEST_CONSUMERS = {
-    "./internal/backupusage", "./internal/imagetracking", "./internal/releaseretirement",
+    "./internal/backupusage", "./internal/buildadmission",
+    "./internal/imagetracking", "./internal/releaseretirement",
 }
 # A source dependency can sit beneath a large composition-root test package.
 # Keep its domain contract tests as a first-class, name-scoped edge rather than

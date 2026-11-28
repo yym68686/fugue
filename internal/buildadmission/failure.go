@@ -1,4 +1,4 @@
-package controller
+package buildadmission
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/buildadmission/contract"
 	"fugue/internal/model"
 	"fugue/internal/sourceimport"
 )
@@ -20,17 +21,17 @@ type permanentBuildFailure struct {
 	ObservedAt  time.Time `json:"observed_at"`
 }
 
-type buildFailureLedger struct {
+type FailureLedger struct {
 	Version  int                              `json:"version"`
 	Failures map[string]permanentBuildFailure `json:"failures"`
 }
 
 func buildFailureLedgerKey(app model.App) string {
-	return "builder-permanent-failures/v1/" + app.TenantID + "/" + app.ID
+	return contract.Failure(app.TenantID, app.ID)
 }
 
-func decodeBuildFailureLedger(raw []byte) (buildFailureLedger, error) {
-	ledger := buildFailureLedger{Version: 1, Failures: map[string]permanentBuildFailure{}}
+func decodeBuildFailureLedger(raw []byte) (FailureLedger, error) {
+	ledger := FailureLedger{Version: 1, Failures: map[string]permanentBuildFailure{}}
 	if len(raw) == 0 {
 		return ledger, nil
 	}
@@ -43,7 +44,7 @@ func decodeBuildFailureLedger(raw []byte) (buildFailureLedger, error) {
 	return ledger, nil
 }
 
-func buildInputFingerprint(source model.AppSource, spec model.AppSpec, policy sourceimport.BuilderPodPolicy) string {
+func InputFingerprint(source model.AppSource, spec model.AppSpec, policy sourceimport.BuilderPodPolicy) string {
 	if source.CommitSHA == "" && source.ArchiveSHA256 == "" {
 		return ""
 	}
@@ -69,27 +70,19 @@ func buildInputFingerprint(source model.AppSource, spec model.AppSpec, policy so
 	return fmt.Sprintf("sha256:%x", sha256.Sum256(data))
 }
 
-func (s *Service) effectiveImportBuilderPolicy(ceiling int64) sourceimport.BuilderPodPolicy {
-	policy := sourceimport.BuilderPodPolicy{}
-	if importer, ok := s.importer.(*sourceimport.Importer); ok {
-		policy = importer.BuilderPolicy
-	}
-	return sourceimport.EffectiveBuilderPolicy(policy, ceiling)
-}
-
-func (s *Service) readBuildFailureLedger(ctx context.Context, app model.App) (buildFailureLedger, error) {
-	raw, err := s.Store.ReadObservationCheckpoint(ctx, buildFailureLedgerKey(app))
+func (s *Service) ReadFailureLedger(ctx context.Context, app model.App) (FailureLedger, error) {
+	raw, err := s.checkpoint.Read(ctx, buildFailureLedgerKey(app))
 	if err != nil {
-		return buildFailureLedger{}, err
+		return FailureLedger{}, err
 	}
 	return decodeBuildFailureLedger(raw)
 }
 
-func (s *Service) recordPermanentBuildFailure(ctx context.Context, app model.App, opID, fingerprint string, failure *sourceimport.BuilderResourceFailure) error {
+func (s *Service) RecordPermanentFailure(ctx context.Context, app model.App, opID, fingerprint string, failure *sourceimport.BuilderResourceFailure) error {
 	if fingerprint == "" || failure == nil {
 		return nil
 	}
-	written, err := s.Store.UpdateObservationCheckpoint(ctx, buildFailureLedgerKey(app), func(raw []byte) ([]byte, error) {
+	written, err := s.checkpoint.Update(ctx, buildFailureLedgerKey(app), func(raw []byte) ([]byte, error) {
 		ledger, err := decodeBuildFailureLedger(raw)
 		if err != nil {
 			return nil, err
@@ -112,7 +105,7 @@ func (s *Service) recordPermanentBuildFailure(ctx context.Context, app model.App
 	return nil
 }
 
-func cachedBuildRejection(ledger buildFailureLedger, fingerprint string) error {
+func CachedRejection(ledger FailureLedger, fingerprint string) error {
 	if previous, ok := ledger.Failures[fingerprint]; ok && fingerprint != "" {
 		return &sourceimport.BuilderResourceFailure{Resource: previous.Resource, LimitBytes: previous.LimitBytes, Preflight: true}
 	}
@@ -121,7 +114,7 @@ func cachedBuildRejection(ledger buildFailureLedger, fingerprint string) error {
 
 // A changed input/policy can resume even after the old automatic retry budget
 // was exhausted. Ordinary transient failures retain their existing backoff.
-func buildPolicyChangedSinceFailure(ledger buildFailureLedger, op model.Operation, fingerprint string) bool {
+func PolicyChangedSinceFailure(ledger FailureLedger, op model.Operation, fingerprint string) bool {
 	if strings.TrimSpace(op.ID) == "" || fingerprint == "" {
 		return false
 	}
