@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/hosteddns"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 )
@@ -20,7 +21,7 @@ type platformDNSExclusion struct {
 // Resolve against frozen desired configuration, then freeze the responses.
 // Legacy cached answers lack a configuration digest, so failed recapture never
 // relabels them as evidence for a potentially changed target.
-func captureDNSFlattenFacts(ctx context.Context, result *platformIntentProjectionResponse, resolve func(context.Context, string, model.DNSRecord) hostedDNSFlattenResult) {
+func captureDNSFlattenFacts(ctx context.Context, result *platformIntentProjectionResponse, resolve func(context.Context, string, model.DNSRecord) hosteddns.Result) {
 	ctx, cancelCapture := context.WithTimeout(ctx, 30*time.Second)
 	defer cancelCapture()
 	for _, desired := range result.Intent.DNS {
@@ -137,8 +138,8 @@ func projectBusinessDNSDraft(result *platformIntentProjectionResponse, apps map[
 			}
 			issue("dns_app_placement_not_projected", host)
 		}
-		if hostedDNSRecordNeedsFlatten(record) {
-			desired.Flatten = &platformconfig.DNSFlattenIntent{Zone: zone.ZoneName, Mode: record.FlattenMode, Target: hostedDNSFlattenTarget(record), IPv4Policy: record.FlattenIPv4Policy, IPv6Policy: record.FlattenIPv6Policy, TTLPolicy: record.FlattenTTLPolicy, FallbackPolicy: record.FlattenFallbackPolicy}
+		if hosteddns.NeedsFlatten(record) {
+			desired.Flatten = &platformconfig.DNSFlattenIntent{Zone: zone.ZoneName, Mode: record.FlattenMode, Target: hosteddns.Target(record), IPv4Policy: record.FlattenIPv4Policy, IPv6Policy: record.FlattenIPv6Policy, TTLPolicy: record.FlattenTTLPolicy, FallbackPolicy: record.FlattenFallbackPolicy}
 			issue("dns_flatten_observation_not_captured", host)
 		}
 		// Never copy flattened answers, resolver status or LastPublishedAt into

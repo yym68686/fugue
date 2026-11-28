@@ -1,7 +1,9 @@
 package store
 
 import (
+	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"net"
 	"sort"
@@ -108,10 +110,23 @@ func (s *Store) PutDNSRecord(zone model.HostedZone, record model.DNSRecord, over
 }
 
 func (s *Store) PatchDNSRecord(zone model.HostedZone, recordID string, patch model.DNSRecordPatch, overwrite bool) (model.DNSRecord, error) {
-	current, err := s.GetDNSRecord(zone.ID, recordID)
-	if err != nil {
-		return model.DNSRecord{}, err
+	zone = normalizeHostedZoneForRead(zone)
+	recordID = strings.TrimSpace(recordID)
+	if zone.ID == "" || recordID == "" {
+		return model.DNSRecord{}, ErrInvalidInput
 	}
+	return s.pgWriteDNSRecord(zone, overwrite, func(ctx context.Context, tx *sql.Tx) (model.DNSRecord, error) {
+		current, err := scanDNSRecord(tx.QueryRowContext(ctx, dnsRecordSelect()+`
+WHERE zone_id=$1 AND tenant_id=$2 AND id=$3 FOR UPDATE
+`, zone.ID, zone.TenantID, recordID))
+		if err != nil {
+			return model.DNSRecord{}, mapDBErr(err)
+		}
+		return normalizeDNSRecordForStore(zone, applyHostedDNSRecordPatch(current, patch))
+	})
+}
+
+func applyHostedDNSRecordPatch(current model.DNSRecord, patch model.DNSRecordPatch) model.DNSRecord {
 	if patch.Values != nil {
 		current.Values = append([]string(nil), (*patch.Values)...)
 	}
@@ -139,7 +154,7 @@ func (s *Store) PatchDNSRecord(zone model.HostedZone, recordID string, patch mod
 	if patch.Status != nil {
 		current.Status = *patch.Status
 	}
-	return s.PutDNSRecord(zone, current, overwrite)
+	return current
 }
 
 func (s *Store) DeleteDNSRecord(zoneID, recordID string) (model.DNSRecord, error) {

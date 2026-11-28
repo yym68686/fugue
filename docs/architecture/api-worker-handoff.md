@@ -28,6 +28,31 @@ connection preparation are not durable background operations.
 
 Record production ownership against an exact release receipt for each transfer.
 
+### Hosted DNS flattened answers
+
+This handoff only moves the periodic refresh of derived hosted DNS answers.
+The API still accepts DNS record intent and reads the stored result. Signed
+platform capture and publication are a separate authority path and do not
+consume the worker's cache as proof of a fresh observation.
+
+First release the worker in standby. Its restricted database login can call
+only the hosted DNS functions, and while the owner is `api` those functions
+do not expose the work page or allow its completion. Next release the
+compatible API, which checks the owner under a shared transaction lock before
+committing a derived answer. It can only update the exact observed record
+revision in an active zone; a concurrent intent change wins.
+
+After ownership transfer, the worker reads at most eight records after the
+durable cursor, resolves them outside the page transaction, and commits
+derived results and the next cursor together. A failed or interrupted page
+leaves the old cursor intact. The next worker resumes from that checkpoint.
+The separate publication path retains its existing inputs and retry rules.
+
+Do not transfer ownership on either compatibility release. First verify
+independent monitoring and confirm that both live images and their actual
+rollback targets respect the database owner. An initial worker's empty
+rollback and an API rollback that predates the fence are not eligible.
+
 ### Storage lifecycle audit worker
 
 The `fugue-storage-audit-worker` candidate requires its own database login.

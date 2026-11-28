@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"fugue/internal/hosteddns"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 
@@ -167,11 +168,11 @@ func appMailDNSMatches(kind string, expected, observed []string) bool {
 // Query only the exact RR owner through the system resolver. Do not follow
 // CNAMEs or accept unrelated answers as proof of the configured record.
 func lookupAppMailDNS(ctx context.Context, host, kind string) ([]string, error) {
-	r := newHostedDNSFlattenResolver()
+	client := &dns.Client{Timeout: 3 * time.Second}
 	message := new(dns.Msg)
 	message.SetQuestion(dns.Fqdn(host), dns.StringToType[kind])
-	for _, server := range r.servers {
-		response, _, err := r.client.ExchangeContext(ctx, message, server)
+	for _, server := range hosteddns.SystemResolvers() {
+		response, _, err := client.ExchangeContext(ctx, message, server)
 		if err == nil && response != nil && response.Truncated {
 			client := &dns.Client{Net: "tcp", Timeout: 3 * time.Second}
 			response, _, err = client.ExchangeContext(ctx, message, server)

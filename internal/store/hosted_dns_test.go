@@ -1,12 +1,96 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
 )
+
+func TestHostedDNSFlattenObservationFencesConcurrentIntent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newHostedDNSTestStore(t)
+	zone := putHostedDNSTestZone(t, s, createHostedDNSTestTenant(t, s, "dns-owner"), "example.com")
+	record := putHostedDNSTestRecord(t, s, zone, model.DNSRecord{
+		Name: "@", Type: model.DNSRecordTypeALIAS, Values: []string{"old.example.net"},
+		TTL: 300, Source: model.DNSRecordSourceUser, Status: model.DNSRecordStatusActive,
+	})
+	now := time.Now().UTC()
+	result := record
+	result.FlattenStatus = model.DNSRecordFlattenStatusResolved
+	result.FlattenedA = []string{"1.1.1.1"}
+	result.LastResolvedAt = &now
+
+	changedIntent := record
+	changedIntent.Values = []string{"new.example.net"}
+	changedIntent.FlattenTarget = "new.example.net"
+	changedIntent.TTL = 420
+	changedIntent, err := s.PutDNSRecord(zone, changedIntent, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := s.CommitHostedDNSFlattenObservation(ctx, zone, record, result); err != nil || changed {
+		t.Fatalf("stale answer changed current intent: changed=%t err=%v", changed, err)
+	}
+
+	// The exact current revision accepts derived answers without receiving
+	// authority to apply any user fields copied into the observation.
+	result.Values = []string{"other.example.net"}
+	result.TTL = 300
+	if changed, err := s.CommitHostedDNSFlattenObservation(ctx, zone, changedIntent, result); err != nil || !changed {
+		t.Fatalf("current answer did not commit: changed=%t err=%v", changed, err)
+	}
+	current, err := s.GetDNSRecord(zone.ID, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.TTL != 420 || current.FlattenTarget != "new.example.net" ||
+		len(current.FlattenedA) != 1 || current.FlattenedA[0] != "1.1.1.1" ||
+		!current.UpdatedAt.After(changedIntent.UpdatedAt) {
+		t.Fatalf("wrong persisted intent or answer: %+v", current)
+	}
+	if changed, err := s.CommitHostedDNSFlattenObservation(ctx, zone, changedIntent, result); err != nil || changed {
+		t.Fatalf("competing observation reused a consumed revision: changed=%t err=%v", changed, err)
+	}
+	if changed, err := s.commitHostedDNSFlattenObservation(ctx, HostedDNSFlattenWorker, zone, current, result); err != nil || changed {
+		t.Fatalf("standby worker wrote an answer: changed=%t err=%v", changed, err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO fugue_meta (key,value) VALUES($1,$2)`, hostedDNSFlattenOwnerKey, HostedDNSFlattenWorker); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := s.CommitHostedDNSFlattenObservation(ctx, zone, current, result); err != nil || changed {
+		t.Fatalf("old API wrote after authority changed: changed=%t err=%v", changed, err)
+	}
+	if changed, err := s.commitHostedDNSFlattenObservation(ctx, HostedDNSFlattenWorker, zone, current, result); err != nil || !changed {
+		t.Fatalf("active worker could not publish an answer: changed=%t err=%v", changed, err)
+	}
+	current, err = s.GetDNSRecord(zone.ID, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	suspended := zone
+	suspended.Status = model.HostedZoneStatusSuspended
+	suspended, err = s.UpdateHostedZoneStatus(suspended)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := s.commitHostedDNSFlattenObservation(ctx, HostedDNSFlattenWorker, zone, current, result); err != nil || changed {
+		t.Fatalf("suspended zone accepted an answer: changed=%t err=%v", changed, err)
+	}
+	suspended.Status = zone.Status
+	if _, err := s.UpdateHostedZoneStatus(suspended); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DeleteDNSRecord(zone.ID, record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := s.commitHostedDNSFlattenObservation(ctx, HostedDNSFlattenWorker, zone, current, result); err != nil || changed {
+		t.Fatalf("observation recreated a deleted record: changed=%t err=%v", changed, err)
+	}
+}
 
 func TestHostedDNSZonesAreTenantScoped(t *testing.T) {
 	t.Parallel()
@@ -31,6 +115,71 @@ func TestHostedDNSZonesAreTenantScoped(t *testing.T) {
 	}
 	if len(allZones) != 2 {
 		t.Fatalf("expected platform admin to see both zones, got %+v", allZones)
+	}
+}
+
+func TestHostedDNSPatchKeepsObservationCommittedWhileWaitingForZone(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	s := newHostedDNSTestStore(t)
+	zone := putHostedDNSTestZone(t, s, createHostedDNSTestTenant(t, s, "dns-patch"), "example.com")
+	record := putHostedDNSTestRecord(t, s, zone, model.DNSRecord{
+		Name: "@", Type: model.DNSRecordTypeALIAS, Values: []string{"target.example.net"},
+		TTL: 300, Source: model.DNSRecordSourceUser, Status: model.DNSRecordStatusActive,
+	})
+	worker, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Rollback()
+	if _, err := worker.ExecContext(ctx, `SELECT 1 FROM fugue_dns_zones WHERE id=$1 FOR UPDATE`, zone.ID); err != nil {
+		t.Fatal(err)
+	}
+	type patchResult struct {
+		record model.DNSRecord
+		err    error
+	}
+	finished := make(chan patchResult, 1)
+	go func() {
+		ttl := 600
+		out, err := s.PatchDNSRecord(zone, record.ID, model.DNSRecordPatch{TTL: &ttl}, false)
+		finished <- patchResult{out, err}
+	}()
+	// A waiter at the zone lock distinguishes the old pre-read from the fixed
+	// locked read without relying on a sleep to schedule the request.
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var waiting bool
+		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%fugue_dns_zones%FOR UPDATE%')`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatal("patch did not wait for the zone lock")
+		}
+	}
+	if _, err := worker.ExecContext(ctx, `UPDATE fugue_dns_records SET flattened_a_json='["1.1.1.1"]',
+flatten_status='resolved', last_resolved_at=clock_timestamp(), updated_at=clock_timestamp() WHERE id=$1`, record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-finished:
+		if got.err != nil || got.record.TTL != 600 || got.record.FlattenStatus != model.DNSRecordFlattenStatusResolved ||
+			len(got.record.FlattenedA) != 1 || got.record.FlattenedA[0] != "1.1.1.1" || got.record.LastResolvedAt == nil {
+			t.Fatalf("patch lost the observation or intent: %+v, %v", got.record, got.err)
+		}
+	case <-ctx.Done():
+		t.Fatal("patch did not finish after the observation committed")
 	}
 }
 

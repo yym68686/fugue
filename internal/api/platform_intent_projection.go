@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/hosteddns"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
@@ -338,11 +339,11 @@ func (s *Server) projectPlatformIntentWithInputs(ctx context.Context, principal 
 		}
 	}
 	advance("dns_flatten")
-	resolver := newHostedDNSFlattenResolver()
+	resolver := hosteddns.NewResolver()
 	if err := projectAppStaticEdgeDNS(&projection, business, domainsConfig.AppBaseDomain); err != nil {
 		return platformIntentProjectionResponse{}, err
 	}
-	captureDNSFlattenFacts(ctx, &projection, resolver.resolve)
+	captureDNSFlattenFacts(ctx, &projection, resolver.Resolve)
 	advance("placements")
 	s.capturePlatformPlacements(ctx, &projection)
 	issues := projection.Issues[:0]

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/hosteddns"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
@@ -347,7 +348,7 @@ func edgeDNSHostedRecordConflictsWithProtected(record model.DNSRecord, protected
 	if name == "" {
 		return true
 	}
-	if hostedDNSRecordNeedsFlatten(record) {
+	if hosteddns.NeedsFlatten(record) {
 		return protected[name+"\x00"+model.EdgeDNSRecordTypeA] || protected[name+"\x00"+model.EdgeDNSRecordTypeAAAA]
 	}
 	recordType := model.NormalizeDNSRecordType(record.Type)
@@ -425,7 +426,7 @@ func edgeDNSRecordsForHostedRecord(record model.DNSRecord) []model.EdgeDNSRecord
 			reason = "hosted DNS record is degraded"
 		}
 	}
-	if hostedDNSRecordNeedsFlatten(record) {
+	if hosteddns.NeedsFlatten(record) {
 		if record.FlattenFallbackPolicy == model.DNSRecordFlattenFallbackFailClosed && len(record.FlattenedA) == 0 && len(record.FlattenedAAAA) == 0 {
 			return nil
 		}
@@ -447,17 +448,6 @@ func edgeDNSRecordsForHostedRecord(record model.DNSRecord) []model.EdgeDNSRecord
 		return []model.EdgeDNSRecord{edgeDNSRecord(name, record.Type, record.Values, record.TTL, model.EdgeDNSRecordKindHosted, status, reason, "", record.TenantID, "", "")}
 	default:
 		return nil
-	}
-}
-
-func hostedDNSRecordNeedsFlatten(record model.DNSRecord) bool {
-	switch model.NormalizeDNSRecordType(record.Type) {
-	case model.DNSRecordTypeALIAS, model.DNSRecordTypeANAME:
-		return true
-	case model.DNSRecordTypeCNAME:
-		return model.NormalizeDNSRecordFlattenMode(record.FlattenMode) != model.DNSRecordFlattenModeNone
-	default:
-		return false
 	}
 }
 
