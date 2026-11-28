@@ -42,6 +42,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control capture-release-recovery-archive NAMESPACE COMPONENT KUBECONFIG CONTEXT NEW_PRIVATE_DIRECTORY
        fugue-production-control observe-release-registry-rehome ARCHIVE PIN GROUP KUBECONFIG CONTEXT
        fugue-production-control draft-release-registry-rehome JOURNAL_CONFIG KUBECONFIG CONTEXT ARCHIVE PIN GROUP REQUEST MIRROR_CONFIG
+       fugue-production-control pack-release-registry-rehome ARCHIVE PIN SUBMISSION NEW_PRIVATE_DIRECTORY
        fugue-production-control observe-storage-audit-owner CONFIG
        fugue-production-control observe-sample-retention CONFIG
        fugue-production-control sample-retention-baseline-checkpoint CONFIG
@@ -99,6 +100,8 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	switch args[0] {
 	case "observe-release-registry-rehome", "draft-release-registry-rehome":
 		return registryRehomeReviewCommand(ctx, args, out)
+	case "pack-release-registry-rehome":
+		return packRegistryRehomeRecovery(args[1:], out)
 	case "capture-release-recovery-archive":
 		if len(args) != 6 {
 			return errors.New(usage)

@@ -12,6 +12,36 @@ import (
 	"fugue/internal/releaseguardian"
 )
 
+const registryRehomeRecoveryFilename = "registry-rehome-recovery.json"
+
+func packRegistryRehomeRecovery(args []string, out io.Writer) error {
+	if len(args) != 4 || !filepath.IsAbs(args[0]) || !filepath.IsAbs(args[2]) {
+		return errors.New(usage)
+	}
+	archive, err := readFile(args[0], releaseguardian.MaxReleaseArchiveBytes, true)
+	if err != nil {
+		return err
+	}
+	defer clear(archive)
+	review, err := readFile(args[2], productioncontrol.MaxSubmissionBytes, false)
+	if err != nil {
+		return err
+	}
+	submission, err := productioncontrol.DecodeSubmission(review)
+	if err != nil {
+		return err
+	}
+	raw, report, err := releaseguardian.BuildRegistryRehomeRecoveryBundle(archive, args[1], submission)
+	if err != nil {
+		return err
+	}
+	defer clear(raw)
+	if err := writePrivateReleaseRecovery(args[3], registryRehomeRecoveryFilename, raw); err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(report)
+}
+
 func registryRehomeReviewCommand(ctx context.Context, args []string, out io.Writer) error {
 	draft := args[0] == "draft-release-registry-rehome"
 	if (!draft && len(args) != 6) || (draft && len(args) != 9) {

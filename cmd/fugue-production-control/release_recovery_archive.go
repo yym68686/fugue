@@ -36,6 +36,13 @@ func captureReleaseRecoveryArchive(ctx context.Context, namespace, component, ku
 }
 
 func writePrivateReleaseArchive(dir string, raw []byte) error {
+	return writePrivateReleaseRecovery(dir, sealedReleaseArchiveName, raw)
+}
+
+func writePrivateReleaseRecovery(dir, filename string, raw []byte) error {
+	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
+		return errors.New("release recovery requires a new absolute private directory")
+	}
 	if err := os.Mkdir(dir, 0700); err != nil {
 		return errors.New("cannot create a new private release recovery directory")
 	}
@@ -44,7 +51,7 @@ func writePrivateReleaseArchive(dir string, raw []byte) error {
 		return err
 	}
 	defer root.Close()
-	partial := sealedReleaseArchiveName + ".partial"
+	partial := filename + ".partial"
 	file, err := root.OpenFile(partial, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
@@ -53,7 +60,7 @@ func writePrivateReleaseArchive(dir string, raw []byte) error {
 	defer func() {
 		if !published {
 			_ = root.Remove(partial)
-			_ = root.Remove(sealedReleaseArchiveName)
+			_ = root.Remove(filename)
 		}
 	}()
 	_, err = file.Write(raw)
@@ -63,7 +70,7 @@ func writePrivateReleaseArchive(dir string, raw []byte) error {
 	if err := errors.Join(err, file.Close()); err != nil {
 		return err
 	}
-	if err := root.Rename(partial, sealedReleaseArchiveName); err != nil {
+	if err := root.Rename(partial, filename); err != nil {
 		return err
 	}
 	top, err := root.Open(".")

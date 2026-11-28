@@ -113,25 +113,36 @@ func registryRehomeDraftDigest(draft RegistryRehomeDraft) (string, error) {
 }
 
 func projectRegistryRehome(record sealedRecoveryRecord, destination string) (RegistryRehomeProjection, []RegistryRehomeService, error) {
+	p, services, _, err := projectRegistryRehomeWorkload(record, destination)
+	return p, services, err
+}
+
+// projectRegistryRehomeWorkload keeps the original archives immutable. In
+// addition to the reviewed PodSpec digest, it derives a single-Deployment
+// recovery template. Companions remain context, never delegated writes.
+func projectRegistryRehomeWorkload(record sealedRecoveryRecord, destination string) (RegistryRehomeProjection, []RegistryRehomeService, []byte, error) {
+	fail := func(err error) (RegistryRehomeProjection, []RegistryRehomeService, []byte, error) {
+		return RegistryRehomeProjection{}, nil, nil, err
+	}
 	scope := recoveryWorkloadKey(record.workload).resource
 	source := record.prepared.Forward.ImageRef
 	destinationRef, err := name.NewDigest(destination, name.StrictValidation)
 	if err != nil || destinationRef.Name() != destination || destinationRef.DigestStr() != record.version.Receipt.TopDigest ||
 		source != record.version.Receipt.ImmutableRef || source == destination ||
 		scope.APIVersion != "apps/v1" || scope.Kind != "Deployment" {
-		return RegistryRehomeProjection{}, nil, errors.New("registry rehome projection requires the original Deployment artifact digest")
+		return fail(errors.New("registry rehome projection requires the original Deployment artifact digest"))
 	}
 	set, err := declarativerelease.DecodeResourceSet(bytes.NewReader(record.forward))
 	if err != nil {
-		return RegistryRehomeProjection{}, nil, err
+		return fail(err)
 	}
 	ids, err := declarativerelease.ResourceSetIdentities(record.forward)
 	if err != nil {
-		return RegistryRehomeProjection{}, nil, err
+		return fail(err)
 	}
 	deployment, err := set.Primary(record.workload)
 	if err != nil {
-		return RegistryRehomeProjection{}, nil, err
+		return fail(err)
 	}
 	services := make([]RegistryRehomeService, 0, len(ids)-1)
 	for index, id := range ids {
@@ -139,11 +150,11 @@ func projectRegistryRehome(record sealedRecoveryRecord, destination string) (Reg
 			continue
 		}
 		if id.Kind != "Service" || id.APIVersion != "v1" || id.Namespace != scope.Namespace {
-			return RegistryRehomeProjection{}, nil, errors.New("registry rehome cannot delegate writes to other release resources")
+			return fail(errors.New("registry rehome cannot delegate writes to other release resources"))
 		}
 		canonical, err := registryRehomeServiceShape(set.Items[index])
 		if err != nil {
-			return RegistryRehomeProjection{}, nil, err
+			return fail(err)
 		}
 		services = append(services, RegistryRehomeService{Identity: id, ShapeDigest: digest(canonical)})
 	}
@@ -152,11 +163,11 @@ func projectRegistryRehome(record sealedRecoveryRecord, destination string) (Reg
 	pod, _ := template["spec"].(map[string]any)
 	containers, err := singleArtifactDeploymentContainers(pod, source)
 	if err != nil {
-		return RegistryRehomeProjection{}, nil, err
+		return fail(err)
 	}
 	before, err := declarativerelease.CanonicalJSON(pod)
 	if err != nil {
-		return RegistryRehomeProjection{}, nil, err
+		return fail(err)
 	}
 	changes := make([]RegistryRehomeContainer, 0, len(containers))
 	for _, container := range containers {
@@ -165,11 +176,30 @@ func projectRegistryRehome(record sealedRecoveryRecord, destination string) (Reg
 	}
 	after, err := declarativerelease.CanonicalJSON(pod)
 	if err != nil {
-		return RegistryRehomeProjection{}, nil, err
+		return fail(err)
+	}
+	if meta, ok := template["metadata"].(map[string]any); ok {
+		if value, exists := meta["annotations"]; exists {
+			annotations, ok := value.(map[string]any)
+			if !ok {
+				return fail(errors.New("registry rehome has invalid pod template annotations"))
+			}
+			if stamp, exists := annotations[podArtifactImageAnnotation]; exists {
+				if stamp != source {
+					return fail(errors.New("registry rehome source artifact stamp differs from its sealed image"))
+				}
+				annotations[podArtifactImageAnnotation] = destination
+			}
+		}
+	}
+	set.Items = []map[string]any{deployment}
+	workload, err := declarativerelease.CanonicalJSON(set)
+	if err != nil {
+		return fail(err)
 	}
 	monitor := record.version.Monitor
 	return RegistryRehomeProjection{RecordDigest: monitor.RecordDigest, SourceManifestDigest: monitor.ForwardManifestDigest,
-		SourceImage: source, IndependentImage: destination, SourcePodSpecDigest: digest(before), TargetPodSpecDigest: digest(after), Containers: changes}, services, nil
+		SourceImage: source, IndependentImage: destination, SourcePodSpecDigest: digest(before), TargetPodSpecDigest: digest(after), Containers: changes}, services, workload, nil
 }
 
 func registryRehomeServiceShape(item map[string]any) ([]byte, error) {
