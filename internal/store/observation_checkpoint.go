@@ -10,6 +10,8 @@ import (
 	"strings"
 )
 
+var errBuilderAdmissionCheckpointScope = errors.New("builder admission checkpoint ownership does not match the writer")
+
 // Observation checkpoints contain only rebuildable runtime facts. They never
 // change configuration, release authority, backup metadata, or serving LKG.
 func (s *Store) ReadObservationCheckpoint(ctx context.Context, key string) ([]byte, error) {
@@ -27,6 +29,9 @@ func (s *Store) ReadObservationCheckpoint(ctx context.Context, key string) ([]by
 func (s *Store) UpdateObservationCheckpoint(ctx context.Context, key string, fn func([]byte) ([]byte, error)) (bool, error) {
 	if strings.HasPrefix(key, backupInventoryCheckpointPrefix) || key == backupInventoryOwnerKey {
 		return false, fmt.Errorf("%w: backup inventory uses its dedicated checkpoint writer", ErrInvalidInput)
+	}
+	if isBuilderAdmissionCheckpoint(key) {
+		return false, errBuilderAdmissionCheckpointScope
 	}
 	return s.updateObservationCheckpoint(ctx, key, fn, nil)
 }

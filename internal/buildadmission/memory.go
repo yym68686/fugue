@@ -1,4 +1,4 @@
-package controller
+package buildadmission
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"fugue/internal/buildadmission/contract"
 	"fugue/internal/model"
 	"fugue/internal/sourceimport"
 )
@@ -27,11 +28,11 @@ type buildMemoryLedger struct {
 	Profiles map[string][]buildMemorySample `json:"profiles"`
 }
 
-func buildMemoryLedgerKey(app model.App) string {
-	return "builder-memory/v1/" + app.TenantID + "/" + app.ID
+func memoryLedgerKey(app model.App) string {
+	return contract.Memory(app.TenantID, app.ID)
 }
 
-func buildMemoryScope(source model.AppSource, spec model.AppSpec) string {
+func MemoryScope(source model.AppSource, spec model.AppSpec) string {
 	// Ordinary commits and uploads reuse history, but different source roots,
 	// repository branches, configuration, tenants and apps do not share it.
 	data, _ := json.Marshal(struct {
@@ -48,7 +49,7 @@ func buildMemoryScope(source model.AppSource, spec model.AppSpec) string {
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
-func buildMemoryProfile(scope, profile string) string {
+func MemoryProfile(scope, profile string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(scope+"\x00"+profile)))
 }
 
@@ -85,8 +86,8 @@ func decodeBuildMemoryLedger(raw []byte, now time.Time) (buildMemoryLedger, erro
 	return ledger, nil
 }
 
-func (s *Service) readBuildMemoryTarget(ctx context.Context, ledgerKey, profile string) (int64, error) {
-	raw, err := s.Store.ReadObservationCheckpoint(ctx, ledgerKey)
+func (s *Service) MemoryTarget(ctx context.Context, app model.App, profile string) (int64, error) {
+	raw, err := s.checkpoint.Read(ctx, memoryLedgerKey(app))
 	if err != nil {
 		return 0, err
 	}
@@ -111,12 +112,12 @@ func (s *Service) readBuildMemoryTarget(ctx context.Context, ledgerKey, profile 
 	return min(target, sourceimport.MaxBuilderHeavyMemoryLimitBytes()), nil
 }
 
-func (s *Service) recordBuildMemoryPeak(ctx context.Context, ledgerKey, profile, uid string, peak int64) error {
+func (s *Service) RecordMemoryPeak(ctx context.Context, app model.App, profile, uid string, peak int64) error {
 	if len(profile) != 64 || uid == "" || len(uid) > 128 || peak <= 0 || peak > sourceimport.MaxBuilderHeavyMemoryLimitBytes() {
 		return errors.New("invalid build memory observation")
 	}
 	for {
-		written, err := s.Store.UpdateObservationCheckpoint(ctx, ledgerKey, func(raw []byte) ([]byte, error) {
+		written, err := s.checkpoint.Update(ctx, memoryLedgerKey(app), func(raw []byte) ([]byte, error) {
 			now := time.Now().UTC()
 			ledger, err := decodeBuildMemoryLedger(raw, now)
 			if err != nil {
