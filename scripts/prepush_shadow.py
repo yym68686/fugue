@@ -28,6 +28,7 @@ FIELDS = (
     "Imports", "TestImports", "XTestImports", *SOURCE, *TEST,
 )
 ENV_FIELDS = ("GOVERSION", "GOOS", "GOARCH", "CGO_ENABLED", "GOFLAGS")
+ARTIFACT_PROFILES = ("linux/amd64", "linux/arm64")
 
 # Go's import graph does not see tests reading another package's source or
 # executing a command. Keep those contracts as test edges, never build edges.
@@ -275,6 +276,20 @@ def compare_targets(base, targets):
         "comparisons": comparisons,
         "disposition": disposition,
     }
+
+
+def selection_from_comparison(comparison):
+    native = comparison["native"]["selection"]
+    if comparison["disposition"] != "same-selection-across-requested-profiles" and native["scope"] != "full":
+        return {**native, **full("native and artifact target selections require wider verification")}
+    return native
+
+
+def conservative_report(base):
+    """Time and enforce target agreement for a non-authorizing replay."""
+    started = time.monotonic()
+    result = selection_from_comparison(compare_targets(base, ARTIFACT_PROFILES))
+    return {**result, "elapsedMs": round((time.monotonic() - started) * 1000)}
 
 
 def parse_target(value):

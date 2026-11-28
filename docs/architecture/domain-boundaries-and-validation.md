@@ -34,6 +34,19 @@ them by writer and transaction, keeping auth, fencing and billing behavior.
 tree. Use `PREPUSH_BASE_REF=<commit> make prepush-shadow` to replay a committed
 diff. It is separate from `make prepush` and cannot authorize a push.
 
+`make prepush-local` runs the proposed checks and does not produce a release
+receipt. It includes the build-profile comparison, runs the selected build
+before affected tests for runtime edits, and omits the legacy priority and
+API warmup only on this local path. Profile disagreement or unclear ownership
+keeps the full uncached Go gate. It rejects CI use and a changed worktree.
+Keep using the unchanged `make prepush` for the production gate.
+
+The local fallback has a separate six-minute ceiling and does not count
+towards the 60-second local-edit target. In the hosted cross-domain replay,
+the selector widened on all profiles; all 20 pairs exceeded the candidate's
+short timeout, while the separately run full oracle passed. A wider fallback
+that still times out fails the command; it never retries with fewer checks.
+
 - One package's runtime edit includes its transitive production importers and
   the tests that import any changed or affected package. Test-only changes do
   not rebuild downstream packages.
@@ -98,6 +111,15 @@ and Linux artifact target plans for the first sample. The manual daily audit
 exposes this profile through `shadow_incremental`. It offers operation queue,
 backup usage, retirement, installer policy, and cross-domain edit cases.
 
+For runtime edits, `--build-first` tries the selected dependency build before
+the selected tests so the two Go processes do not compete to compile the same
+changed packages. `--verify-targets` includes native and both Linux artifact
+profiles in every measured candidate run. In that mode, a profile mismatch
+or incomplete graph executes the uncached whole-module Go checks rather than
+a narrower test set. The manual daily audit exposes these switches as
+`shadow_build_first` and `shadow_verify_targets`. Neither changes
+`make prepush` or emits a production receipt.
+
 For a source-owned writer capability or generator with an implicit downstream
 consumer, use the manual `contract-tracking-scope`,
 `contract-retirement-scope`, or `contract-generator-consumer` shadow case. The witness first requires the
@@ -137,6 +159,23 @@ packages; the affected tests exceeded the default deadline without any old
 suite omitted. A combined queue and operation-read change selected full scope
 on all three profiles. Shared, cross-domain, and unclassified changes must
 retain wider verification.
+
+The hosted backup runtime replay at `bc7a9f228` used 20 distinct edits
+with separate caches (Linux amd64, 4 logical CPUs, Go 1.25.7, `GOFLAGS=-p=2`).
+The build-first candidate recorded P95 50.377s with zero failures; the
+legacy gate recorded P95 22.382s. Native and both artifact profiles selected
+the same packages, omitted no legacy suite, and the uncached oracle ran
+141 packages successfully. This demonstrates the candidate's budget for that
+case while exercising more tests, not a speedup over the legacy gate. The
+target comparison for this run was outside the candidate timing; use
+`--verify-targets` to measure the complete conservative local path.
+
+The follow-up at `4b4f4d739` included the target comparison in every
+candidate sample on the same hosted profile: 20 incremental pairs, candidate
+P95 43.003s (legacy 18.805s), zero failures, no known omitted legacy suite, and
+142 packages in the passing uncached oracle. This validates the scheduling
+approach for the backup runtime case, not every local runtime edit or a change
+to production authorization.
 
 ## Production isolation decision
 

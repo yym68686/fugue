@@ -484,7 +484,14 @@ def main() -> int:
     return _run_gate()
 
 
-def _run_gate(*, shadow_select=None, shadow_result=None) -> int:
+def _run_gate(*, shadow_select=None, shadow_result=None, shadow_build_first=False,
+              shadow_full_timeout=None) -> int:
+    if (shadow_build_first or shadow_full_timeout is not None) and (
+        shadow_select is None or shadow_result is None
+    ):
+        raise ValueError("shadow scheduling requires a non-authorizing shadow result")
+    if shadow_full_timeout is not None and not 0 < shadow_full_timeout <= MAX_CONFIGURED_TIMEOUT_SECONDS:
+        raise ValueError("invalid shadow full verification timeout")
     started = time.monotonic()
     timeout_seconds = float(os.environ.get("PREPUSH_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
     if timeout_seconds <= 0 or timeout_seconds > MAX_CONFIGURED_TIMEOUT_SECONDS:
@@ -505,12 +512,19 @@ def _run_gate(*, shadow_select=None, shadow_result=None) -> int:
     declarative_vet_finished = threading.Event()
 
     compile_task = ("compile-all", ["go", "build", "-p", "4", "./..."])
+    build_before_tests = False
+    use_full_timeout = False
     if shadow_select is not None:
         if shadow_result is None:
             raise ValueError("shadow replay must use a non-production result collector")
         selection = shadow_select(base)
         test_commands = selection["goTests"]
         compile_task = ("compile-all", selection["goBuilds"][0] if selection["goBuilds"] else None)
+        build_before_tests = (shadow_build_first and selection.get("scope") == "dependency-closure"
+                              and compile_task[1] is not None)
+        if selection.get("scope") == "full" and shadow_full_timeout is not None:
+            use_full_timeout = True
+            deadline = started + shadow_full_timeout
     go_dependent_tasks: dict[str, list[str] | None] = {
         "openapi-generated": [
             "go", "run", "./cmd/fugue-openapi-gen", "-spec", "openapi/openapi.yaml",
@@ -522,10 +536,11 @@ def _run_gate(*, shadow_select=None, shadow_result=None) -> int:
                     "scripts/test_prepush_shadow.py", "scripts/prepush_replay.py",
                     "scripts/test_prepush_replay.py", "scripts/prepush_shadow_fixture.py",
                     "scripts/prepush_shadow_contract.py",
-                    "scripts/test_prepush_shadow_contract.py"} for name in paths):
+                    "scripts/test_prepush_shadow_contract.py", "scripts/prepush_local.py",
+                    "scripts/test_prepush_local.py", "Makefile"} for name in paths):
         non_go_tasks["prepush-selection-tests"] = [sys.executable, "-m", "unittest",
             "scripts.test_prepush", "scripts.test_prepush_shadow", "scripts.test_prepush_replay",
-            "scripts.test_prepush_shadow_contract"]
+            "scripts.test_prepush_shadow_contract", "scripts.test_prepush_local"]
     if any(name in {".github/workflows/ci.yml", "scripts/select_production_maintenance.py",
                     "scripts/test_select_production_maintenance.py", "scripts/select_dns_configuration.py",
                     "scripts/test_select_dns_configuration.py"} or name.startswith("deploy/environments/production/local-snapshot-review/") for name in paths):
@@ -719,7 +734,7 @@ def _run_gate(*, shadow_select=None, shadow_result=None) -> int:
         compile_name, compile_command = compile_task
         compile_future = phase_one.submit(execute, compile_name, compile_command) if compile_command else None
         affected_futures = {}
-        if test_commands:
+        if test_commands and not build_before_tests:
             affected_futures[phase_one.submit(execute, "affected-tests", None)] = "affected-tests"
         non_go_futures = {
             phase_one.submit(execute, name, command): name
@@ -740,6 +755,9 @@ def _run_gate(*, shadow_select=None, shadow_result=None) -> int:
         else:
             compile_status, compile_output, compile_before = compile_future.result()
             record(compile_name, compile_before, compile_status, compile_output)
+
+        if build_before_tests and test_commands:
+            affected_futures[phase_one.submit(execute, "affected-tests", None)] = "affected-tests"
 
         if not failures:
             with concurrent.futures.ThreadPoolExecutor(
@@ -781,11 +799,14 @@ def _run_gate(*, shadow_select=None, shadow_result=None) -> int:
         "sourceCommit": source_commit,
         "status": "fail" if failures else "pass",
     }
+    elapsed_limit_seconds = shadow_full_timeout if use_full_timeout else elapsed_timeout_seconds(set(checks))
+    over_budget = elapsed_ms >= round(elapsed_limit_seconds * 1000)
     if shadow_select is not None:
         shadow_result({
             "elapsedMs": elapsed_ms,
+            "elapsedLimitMs": round(elapsed_limit_seconds * 1000),
             "checks": receipt["checks"],
-            "status": "fail" if failures or elapsed_timeout_exceeded(set(checks), elapsed_ms) else "pass",
+            "status": "fail" if failures or over_budget else "pass",
             "selection": selection,
         })
     else:
@@ -797,8 +818,7 @@ def _run_gate(*, shadow_select=None, shadow_result=None) -> int:
             if output.strip():
                 print(output.rstrip(), file=sys.stderr)
         return 1
-    elapsed_limit_seconds = elapsed_timeout_seconds(set(checks))
-    if elapsed_timeout_exceeded(set(checks), elapsed_ms):
+    if over_budget:
         print(f"prepush exceeded {elapsed_limit_seconds:g}s: {elapsed_ms}ms", file=sys.stderr)
         return 1
     return 0

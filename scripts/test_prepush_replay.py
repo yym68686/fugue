@@ -9,6 +9,18 @@ from scripts import prepush, prepush_replay
 
 
 class ReplayTest(unittest.TestCase):
+    def test_target_checked_sample_uses_the_conservative_selector_in_the_timed_gate(self):
+        def gate(*, shadow_select, shadow_result, shadow_build_first):
+            self.assertIs(shadow_select, prepush_replay.prepush_shadow.conservative_report)
+            self.assertTrue(shadow_build_first)
+            shadow_result({"status": "pass"})
+            return 0
+
+        with mock.patch.object(prepush, "_run_gate", side_effect=gate):
+            result = prepush_replay.candidate_sample(build_first=True, verify_targets=True)
+        self.assertEqual(result["status"], "pass")
+        self.assertGreaterEqual(result["elapsedMs"], 0)
+
     def test_candidate_keeps_non_selection_checks_and_cannot_write_production_receipt(self):
         results = []
         seen = []
@@ -38,6 +50,39 @@ class ReplayTest(unittest.TestCase):
         self.assertFalse(any(cmd[:2] == ["go", "build"] for cmd in seen))
         self.assertEqual(results[0]["checks"]["compile-all"]["status"], "skipped")
         self.assertNotIn("kind", results[0])
+
+    def test_build_first_orders_only_shadow_execution_and_keeps_affected_tests(self):
+        results = []
+        seen = []
+        compile_command = ["go", "build", "./internal/backupusage"]
+        test_command = ["go", "test", "./internal/backupusage"]
+
+        def command(args, _timeout):
+            seen.append(args)
+            if args == test_command:
+                self.assertIn(compile_command, seen)
+            return 0, ""
+
+        with self.assertRaisesRegex(ValueError, "non-authorizing shadow"):
+            prepush._run_gate(shadow_build_first=True)
+        selection = {"scope": "dependency-closure", "goTests": [test_command], "goBuilds": [compile_command]}
+        with (
+            mock.patch.dict(os.environ, {"PREPUSH_TIMEOUT_SECONDS": "5"}),
+            mock.patch.object(prepush, "resolve_base", return_value="HEAD"),
+            mock.patch.object(prepush, "changed_files", return_value=["internal/backupusage/inventory.go"]),
+            mock.patch.object(prepush, "diff_check", return_value=(0, "")),
+            mock.patch.object(prepush, "gofmt_check", return_value=(0, "")),
+            mock.patch.object(prepush, "shell_syntax_check", return_value=(0, "")),
+            mock.patch.object(prepush, "git_output", return_value=b"1" * 40 + b"\n"),
+            mock.patch.object(prepush, "run", side_effect=command),
+            mock.patch.object(prepush, "write_receipt", side_effect=AssertionError("shadow must never issue a receipt")),
+        ):
+            code = prepush._run_gate(shadow_select=lambda _: selection, shadow_result=results.append,
+                                     shadow_build_first=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(seen.count(compile_command), 1)
+        self.assertEqual(seen.count(test_command), 1)
+        self.assertEqual(results[0]["selection"], selection)
 
     def test_nearest_rank_and_failure_are_not_censored(self):
         candidate = {"status": "pass", "elapsedMs": 12_000}
