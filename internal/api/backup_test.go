@@ -3550,30 +3550,6 @@ func TestBackupRunIsStaleFailsPendingRetryAfterDueGrace(t *testing.T) {
 	}
 }
 
-func TestBackupRunWaitingForCoordinationLeaseIsNotAStaleWorker(t *testing.T) {
-	t.Parallel()
-
-	pending := model.BackupRun{
-		Target:     model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase},
-		Status:     model.BackupRunStatusPending,
-		LeaseOwner: "",
-		StartedAt:  nil,
-	}
-	if !backupRunWaitingForCoordinationLease(pending) {
-		t.Fatalf("expected unclaimed control-plane run to wait for coordination: %+v", pending)
-	}
-	running := pending
-	running.Status = model.BackupRunStatusRunning
-	if backupRunWaitingForCoordinationLease(running) {
-		t.Fatalf("running backup is a worker lease recovery candidate: %+v", running)
-	}
-	appBackup := pending
-	appBackup.Target.Type = model.BackupTargetAppDatabase
-	if backupRunWaitingForCoordinationLease(appBackup) {
-		t.Fatalf("app backup must not enter control-plane coordination wait: %+v", appBackup)
-	}
-}
-
 func newBackupFakeS3(t *testing.T) (string, map[string][]byte) {
 	t.Helper()
 	var mu sync.Mutex

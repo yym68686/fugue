@@ -583,11 +583,15 @@ func (s *Store) ListStaleBackupRuns(now time.Time, leaseTTL time.Duration, limit
 }
 
 func (s *Store) GetBackupRun(id string, tenantID string, platformAdmin bool) (model.BackupRun, error) {
+	return s.GetBackupRunContext(context.Background(), id, tenantID, platformAdmin)
+}
+
+func (s *Store) GetBackupRunContext(ctx context.Context, id string, tenantID string, platformAdmin bool) (model.BackupRun, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return model.BackupRun{}, ErrInvalidInput
 	}
-	return s.pgGetBackupRun(id, tenantID, platformAdmin)
+	return s.pgGetBackupRun(ctx, id, tenantID, platformAdmin)
 }
 
 func (s *Store) UpdateBackupRun(id string, update BackupRunUpdate) (model.BackupRun, error) {
@@ -2696,8 +2700,8 @@ func (s *Store) pgListStaleBackupRuns(now time.Time, leaseTTL time.Duration, lim
 	return runs, mapDBErr(rows.Err())
 }
 
-func (s *Store) pgGetBackupRun(id string, tenantID string, platformAdmin bool) (model.BackupRun, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func (s *Store) pgGetBackupRun(ctx context.Context, id string, tenantID string, platformAdmin bool) (model.BackupRun, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	query := backupRunSelectSQL() + ` WHERE id = $1`
 	args := []any{id}
@@ -2709,7 +2713,7 @@ func (s *Store) pgGetBackupRun(id string, tenantID string, platformAdmin bool) (
 }
 
 func (s *Store) pgUpdateBackupRun(id string, update BackupRunUpdate) (model.BackupRun, error) {
-	current, err := s.pgGetBackupRun(id, "", true)
+	current, err := s.pgGetBackupRun(context.Background(), id, "", true)
 	if err != nil {
 		return model.BackupRun{}, err
 	}

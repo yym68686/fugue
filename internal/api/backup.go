@@ -34,6 +34,7 @@ import (
 const (
 	backupSchedulerInterval = time.Minute
 	backupRunTimeout        = 30 * time.Minute
+	backupPendingScanLimit  = 8
 	// The lease is deliberately short so a replacement API worker can reclaim
 	// a run after a rollout. Longhorn CRs are labelled by run ID and are reused
 	// by the successor worker, so reclaiming never creates a second R2 copy.
@@ -568,6 +569,7 @@ func (s *Server) enqueueDueBackups(ctx context.Context) {
 	s.enqueueRecoverableLonghornLockRetries(ctx)
 	s.enqueueDueBackupRetries(ctx)
 	s.enqueuePendingCoordinatedBackupRuns(ctx)
+	s.enqueuePendingOrdinaryBackupRuns(ctx)
 	policies, err := s.store.ListDueBackupPolicies(time.Now().UTC(), 25)
 	if err != nil {
 		if s.log != nil {
@@ -643,7 +645,7 @@ func (s *Server) enqueueRecoverableLonghornLockRetries(ctx context.Context) {
 
 func (s *Server) recoverStaleBackupRuns(ctx context.Context) {
 	now := time.Now().UTC()
-	runs, err := s.store.ListStaleBackupRuns(now, backupRunLeaseTTL, 500)
+	runs, err := s.store.ListExpiredBackupExecutions(ctx, now, backupRunLeaseTTL, 500)
 	if err != nil {
 		if s.log != nil {
 			s.log.Printf("backup scheduler list stale runs for recovery failed: %v", err)
@@ -651,12 +653,6 @@ func (s *Server) recoverStaleBackupRuns(ctx context.Context) {
 		return
 	}
 	for _, run := range runs {
-		if backupRunWaitingForCoordinationLease(run) {
-			// An unclaimed coordinated run may be waiting for a release or
-			// snapshot writer. Both control-plane and tenant Longhorn backups
-			// remain pending for the coordinated pending/due-retry scanners.
-			continue
-		}
 		updated, err := s.store.RecoverStaleBackupRun(run, now, backupRunLeaseTTL)
 		if errors.Is(err, store.ErrConflict) {
 			continue
@@ -674,14 +670,6 @@ func (s *Server) recoverStaleBackupRuns(ctx context.Context) {
 	}
 }
 
-func backupRunWaitingForCoordinationLease(run model.BackupRun) bool {
-	run = model.NormalizeBackupRun(run)
-	return run.Status == model.BackupRunStatusPending &&
-		backupRunNeedsCoordinationLease(run) &&
-		strings.TrimSpace(run.LeaseOwner) == "" &&
-		run.StartedAt == nil
-}
-
 func backupRunIsStale(run model.BackupRun, now time.Time) bool {
 	return store.BackupRunIsStale(run, now, backupRunLeaseTTL)
 }
@@ -697,6 +685,19 @@ func (s *Server) enqueueDueBackupRetries(ctx context.Context) {
 	}
 	for _, run := range runs {
 		go s.executeBackupRun(contextWithoutCancel(ctx), run.ID)
+	}
+}
+
+func (s *Server) enqueuePendingOrdinaryBackupRuns(ctx context.Context) {
+	ids, err := s.store.ListUnclaimedBackupExecutionIDs(ctx, time.Now().UTC(), backupPendingScanLimit)
+	if err != nil {
+		if s.log != nil && ctx.Err() == nil {
+			s.log.Print("backup scheduler could not discover pending ordinary backups")
+		}
+		return
+	}
+	for _, id := range ids {
+		go s.executeBackupRun(contextWithoutCancel(ctx), id)
 	}
 }
 
@@ -1172,16 +1173,41 @@ func (s *Server) handleCreateBackupRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Wait {
+		deadline := time.Now().Add(configuredBackupRunTimeout())
 		s.executeBackupRun(contextWithoutCancel(r.Context()), created.ID)
 		finalRun, err := s.store.GetBackupRun(created.ID, principal.TenantID, principal.IsPlatformAdmin())
 		if err == nil {
 			created = finalRun
+			if !backupRunNeedsCoordinationLease(finalRun) && finalRun.Status == model.BackupRunStatusRunning {
+				watch, cancel := context.WithDeadline(r.Context(), deadline)
+				created = s.waitForRunningBackup(watch, principal, finalRun)
+				cancel()
+			}
 		}
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{"run": created})
 		return
 	}
 	go s.executeBackupRun(contextWithoutCancel(r.Context()), created.ID)
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"run": created})
+}
+
+func (s *Server) waitForRunningBackup(ctx context.Context, principal model.Principal, run model.BackupRun) model.BackupRun {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for run.Status == model.BackupRunStatusRunning {
+		select {
+		case <-ctx.Done():
+			return run
+		case <-ticker.C:
+		}
+		current, err := s.store.GetBackupRunContext(ctx, run.ID, principal.TenantID, principal.IsPlatformAdmin())
+		if err == nil {
+			run = current
+		} else if errors.Is(err, store.ErrNotFound) {
+			return run
+		}
+	}
+	return run
 }
 
 func backupRunTerminalStatus(status string) bool {

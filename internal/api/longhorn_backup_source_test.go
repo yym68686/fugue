@@ -101,7 +101,7 @@ func TestLonghornTenantBackupSharesCleanupFence(t *testing.T) {
 	for _, engine := range []string{model.BackupEngineLonghornSnapshot, "logical-pgdump"} {
 		run := model.BackupRun{Target: model.BackupTarget{Type: model.BackupTargetAppDatabase, Engine: engine}, Status: model.BackupRunStatusPending}
 		want := engine == model.BackupEngineLonghornSnapshot
-		if backupRunNeedsCoordinationLease(run) != want || backupRunWaitingForCoordinationLease(run) != want {
+		if backupRunNeedsCoordinationLease(run) != want {
 			t.Fatal("tenant Longhorn backups must coordinate with cleanup without changing logical backups")
 		}
 	}

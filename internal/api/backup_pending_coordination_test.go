@@ -153,3 +153,69 @@ func TestPendingLonghornBackupScannerResumesRecoveredScheduledWorker(t *testing.
 	server.enqueuePendingCoordinatedBackupRuns(context.Background())
 	waitPendingBackupStatus(t, stateStore, run.ID, model.BackupRunStatusSucceeded)
 }
+
+func TestAcceptedOrdinaryBackupResumesWithoutRepeatingEffects(t *testing.T) {
+	fixture := newBackupAuthorizationFixture(t)
+	stateStore := fixture.stateStore
+	app := fixture.victimApp
+	run, err := stateStore.CreateBackupRun(model.BackupRun{
+		Target: model.BackupTarget{
+			Type: model.BackupTargetAppDatabase, TenantID: app.TenantID, ProjectID: app.ProjectID, AppID: app.ID,
+		},
+		TenantID: app.TenantID, ProjectID: app.ProjectID, AppID: app.ID,
+		BackendID: fixture.victimBackend.ID, Trigger: model.BackupRunTriggerManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-24 * time.Hour)
+	if _, err := stateStore.UpdateBackupRun(run.ID, store.BackupRunUpdate{HeartbeatAt: timePtrPtr(&old)}); err != nil {
+		t.Fatal(err)
+	}
+	first := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	replacement := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	first.recoverStaleBackupRuns(t.Context())
+	pending := waitPendingBackupStatus(t, stateStore, run.ID, model.BackupRunStatusPending)
+	if pending.StartedAt != nil || pending.Attempt != run.Attempt {
+		t.Fatalf("accepted backup was treated as an expired execution: %+v", pending)
+	}
+	var calls atomic.Int32
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	runner := func(ctx context.Context, claimed model.BackupRun) ([]model.BackupArtifact, error) {
+		calls.Add(1)
+		if claimed.ID != run.ID || claimed.LeaseOwner == "" || claimed.Status != model.BackupRunStatusRunning {
+			t.Errorf("executor did not claim the original intent: %+v", claimed)
+		}
+		select {
+		case <-release:
+			return nil, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	first.backupRunner, replacement.backupRunner = runner, runner
+	replacement.enqueuePendingOrdinaryBackupRuns(t.Context())
+	running := waitPendingBackupStatus(t, stateStore, run.ID, model.BackupRunStatusRunning)
+	first.executeBackupRun(t.Context(), run.ID)
+
+	watch, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	observed := make(chan model.BackupRun, 1)
+	owner := model.Principal{TenantID: app.TenantID}
+	go func() {
+		observed <- first.waitForRunningBackup(watch, owner, running)
+	}()
+	close(release)
+	released = true
+	final := <-observed
+	if final.Status != model.BackupRunStatusSucceeded || final.Attempt != run.Attempt ||
+		final.RetryCount != 0 || calls.Load() != 1 {
+		t.Fatalf("expected one terminal outcome for the original intent: calls=%d run=%+v", calls.Load(), final)
+	}
+}
